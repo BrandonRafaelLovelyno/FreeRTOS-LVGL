@@ -1,0 +1,326 @@
+#include "SPI.h"
+#include "Adafruit_GFX.h"
+#include "Adafruit_ILI9341.h"
+#include "lvgl.h"
+#include <DHT.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <TFT_eSPI.h>
+
+#define LOOP_INTERVAL 500
+
+#define TFT_DC 2
+#define TFT_CS 15
+TFT_eSPI tft = TFT_eSPI();
+
+// freertos
+TaskHandle_t TaskUpdate;
+TaskHandle_t TaskMean;
+TaskHandle_t TaskDeviation;
+TaskHandle_t TaskMedian;
+TaskHandle_t TaskMode;
+TaskHandle_t TaskMin;
+TaskHandle_t TaskMax;
+
+// DHT
+#define DHT_PIN 12
+DHT dht(DHT_PIN, DHT22);
+const int numReadings = 100;
+int currentDHTRead = 0;
+float readings[numReadings];
+int readIndex = 0;
+float total = 0;
+float mean = 0;
+
+// Define the display resolution
+#define LV_HOR_RES_MAX 240
+#define LV_VER_RES_MAX 320
+
+// Display buffer
+static lv_disp_draw_buf_t draw_buf;
+static lv_color_t buf[LV_HOR_RES_MAX * 10];
+
+// LVGL display driver
+static lv_disp_drv_t disp_drv;
+
+// LVGL gauge
+lv_obj_t *label_mean;
+lv_obj_t *label_deviation;
+lv_obj_t *label_median;
+lv_obj_t *label_mode;
+lv_obj_t *label_min;
+lv_obj_t *label_max;
+
+float currentTemp = 0.0;
+
+void initializeDHT() {
+    dht.begin();
+    for (int thisReading = 0; thisReading < numReadings; thisReading++) {
+        readings[thisReading] = 0;
+    }
+}
+
+void lv_disp_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p) {
+    int32_t x, y;
+    for (y = area->y1; y <= area->y2; y++) {
+        for (x = area->x1; x <= area->x2; x++) {
+            uint16_t color = color_p->full;  // Assuming color_p->full is in RGB565 format
+            tft.drawPixel(x, y, color);
+            color_p++;
+        }
+    }
+    lv_disp_flush_ready(drv);  // Indicate that flushing is done
+}
+
+void initializeDisplay() {
+    tft.begin();
+    tft.fillScreen(TFT_BLACK);  // Clear the screen
+
+    lv_init();
+
+    // Check buffer allocation
+    if(!buf) {
+        Serial.println("Buffer allocation failed!");
+        return;
+    }
+
+    lv_disp_draw_buf_init(&draw_buf, buf, NULL, LV_HOR_RES_MAX * 10);
+
+    lv_disp_drv_init(&disp_drv);
+    disp_drv.hor_res = LV_HOR_RES_MAX;
+    disp_drv.ver_res = LV_VER_RES_MAX;
+    disp_drv.flush_cb = lv_disp_flush_cb;
+    disp_drv.draw_buf = &draw_buf;
+
+    lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
+    if (!disp) {
+        Serial.println("Display driver registration failed!");
+        return;
+    }
+
+    Serial.println("Display initialized successfully!");
+
+    // Create a test LVGL object
+    lv_obj_t *label = lv_label_create(lv_scr_act());
+    lv_label_set_text(label, "Hello, LVGL!");
+    lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
+}
+
+
+void initializeTask() {
+    xTaskCreate(taskUpdateLabels, "TaskUpdate", 2048, NULL, 1, &TaskUpdate);
+    xTaskCreate(taskGetDHTMean, "TaskMean", 2048, NULL, 2, &TaskMean);
+    xTaskCreate(taskGetDHTDeviation, "TaskDeviation", 2048, NULL, 3, &TaskDeviation);
+    xTaskCreate(taskGetDHTMedian, "TaskMedian",2048, NULL, 3, &TaskMedian);
+    xTaskCreate(taskGetDHTMode, "TaskMode", 2048, NULL, 3, &TaskMode);
+    xTaskCreate(taskGetDHTMin, "TaskMin", 1024, NULL, 4, &TaskMin);
+    xTaskCreate(taskGetDHTMax, "TaskMax", 1024, NULL, 4, &TaskMax);
+    vTaskStartScheduler();
+}
+
+void updateDHT() {
+    total = total - readings[readIndex];
+    currentTemp = dht.readTemperature();
+    readings[readIndex] = currentTemp;
+    total = total + readings[readIndex];
+    readIndex = (readIndex + 1) % numReadings;
+
+    // Increment the number of actual readings
+    if (currentDHTRead < numReadings) {
+        currentDHTRead++;
+    }
+}
+
+float getDHTMean() {
+    if (currentDHTRead == 0) return 0; // Avoid division by zero
+    mean = total / currentDHTRead;
+    return mean;
+}
+
+float getDHTDeviation() {
+    float deviation = 0;
+    for (int i = 0; i < currentDHTRead; i++) {
+        deviation += pow(readings[i] - mean, 2);
+    }
+    deviation = sqrt(deviation / currentDHTRead);
+    return deviation;
+}
+
+float getDHTMedian() {
+    float sortedReadings[numReadings];
+    memcpy(sortedReadings, readings, sizeof(readings)); // Copy readings array
+
+    // Sort the array
+    for (int i = 0; i < currentDHTRead; i++) {
+        for (int j = i + 1; j < currentDHTRead; j++) {
+            if (sortedReadings[i] > sortedReadings[j]) {
+                float temp = sortedReadings[i];
+                sortedReadings[i] = sortedReadings[j];
+                sortedReadings[j] = temp;
+            }
+        }
+    }
+
+    // Calculate the median
+    if (currentDHTRead % 2 == 0) {
+        return (sortedReadings[currentDHTRead / 2 - 1] + sortedReadings[currentDHTRead / 2]) / 2;
+    } else {
+        return sortedReadings[currentDHTRead / 2];
+    }
+}
+
+float getDHTMode() {
+    int maxCount = 0;
+    float mode = 0;
+    for (int i = 0; i < currentDHTRead; i++) {
+        int count = 0;
+        for (int j = 0; j < currentDHTRead; j++) {
+            if (readings[j] == readings[i]) {
+                count++;
+            }
+        }
+        if (count > maxCount) {
+            maxCount = count;
+            mode = readings[i];
+        }
+    }
+    return mode;
+}
+
+float getDHTMin() {
+    float min = 100; // Initialize to a very high value to ensure correct min calculation
+    for (int i = 0; i < currentDHTRead; i++) {
+        if (readings[i] < min) {
+            min = readings[i];
+        }
+    }
+    return min;
+}
+
+float getDHTMax() {
+    float max = -100; // Initialize to a very low value to ensure correct max calculation
+    for (int i = 0; i < currentDHTRead; i++) {
+        if (readings[i] > max) {
+            max = readings[i];
+        }
+    }
+    return max;
+}
+
+void createLabels() {
+    // Create labels for mean, deviation, median, mode, min, max
+    label_mean = lv_label_create(lv_scr_act());
+    lv_label_set_text(label_mean, "Mean: ");
+    lv_obj_align(label_mean, LV_ALIGN_TOP_LEFT, 10, 10);
+    lv_obj_set_style_text_color(label_mean, lv_color_black(), 0);
+
+    label_deviation = lv_label_create(lv_scr_act());
+    lv_label_set_text(label_deviation, "Deviation: ");
+    lv_obj_align(label_deviation, LV_ALIGN_TOP_LEFT, 10, 40);
+    lv_obj_set_style_text_color(label_deviation, lv_color_black(), 0);
+
+    label_median = lv_label_create(lv_scr_act());
+    lv_label_set_text(label_median, "Median: ");
+    lv_obj_align(label_median, LV_ALIGN_TOP_LEFT, 10, 70);
+    lv_obj_set_style_text_color(label_median, lv_color_black(), 0);
+
+    label_mode = lv_label_create(lv_scr_act());
+    lv_label_set_text(label_mode, "Mode: ");
+    lv_obj_align(label_mode, LV_ALIGN_TOP_LEFT, 10, 100);
+    lv_obj_set_style_text_color(label_mode, lv_color_black(), 0);
+
+    label_min = lv_label_create(lv_scr_act());
+    lv_label_set_text(label_min, "Min: ");
+    lv_obj_align(label_min, LV_ALIGN_TOP_LEFT, 10, 130);
+    lv_obj_set_style_text_color(label_min, lv_color_black(), 0);
+
+    label_max = lv_label_create(lv_scr_act());
+    lv_label_set_text(label_max, "Max: ");
+    lv_obj_align(label_max, LV_ALIGN_TOP_LEFT, 10, 160);
+    lv_obj_set_style_text_color(label_max, lv_color_black(), 0);
+}
+
+void taskUpdateLabels(void *parameter) {
+    while (1) {
+        char buffer[20]; // Buffer for converting float to string
+
+        // Update label for mean
+        snprintf(buffer, sizeof(buffer), "Mean: %.2f", getDHTMean());
+        lv_label_set_text(label_mean, buffer);
+
+        // Update label for deviation
+        snprintf(buffer, sizeof(buffer), "Deviation: %.2f", getDHTDeviation());
+        lv_label_set_text(label_deviation, buffer);
+
+        // Update label for median
+        snprintf(buffer, sizeof(buffer), "Median: %.2f", getDHTMedian());
+        lv_label_set_text(label_median, buffer);
+
+        // Update label for mode
+        snprintf(buffer, sizeof(buffer), "Mode: %.2f", getDHTMode());
+        lv_label_set_text(label_mode, buffer);
+
+        // Update label for min
+        snprintf(buffer, sizeof(buffer), "Min: %.2f", getDHTMin());
+        lv_label_set_text(label_min, buffer);
+
+        // Update label for max
+        snprintf(buffer, sizeof(buffer), "Max: %.2f", getDHTMax());
+        lv_label_set_text(label_max, buffer);
+
+        Serial.println("Updated labels");
+        vTaskDelay(pdMS_TO_TICKS(LOOP_INTERVAL));
+    }
+}
+
+void taskGetDHTMean(void *parameter) {
+    while (1) {
+        getDHTMean();
+        vTaskDelay(pdMS_TO_TICKS(LOOP_INTERVAL));
+    }
+}
+
+void taskGetDHTDeviation(void *parameter) {
+    while (1) {
+        getDHTDeviation();
+        vTaskDelay(pdMS_TO_TICKS(LOOP_INTERVAL));
+    }
+}
+
+void taskGetDHTMedian(void *parameter) {
+    while (1) {
+        getDHTMedian();
+        vTaskDelay(pdMS_TO_TICKS(LOOP_INTERVAL));
+    }
+}
+
+void taskGetDHTMode(void *parameter) {
+    while (1) {
+        getDHTMode();
+        vTaskDelay(pdMS_TO_TICKS(LOOP_INTERVAL));
+    }
+}
+
+void taskGetDHTMin(void *parameter) {
+    while (1) {
+        getDHTMin();
+        vTaskDelay(pdMS_TO_TICKS(LOOP_INTERVAL));
+    }
+}
+
+void taskGetDHTMax(void *parameter) {
+    while (1) {
+        getDHTMax();
+        vTaskDelay(pdMS_TO_TICKS(LOOP_INTERVAL));
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+    // initializeDHT();
+    initializeDisplay();
+    // createLabels();
+    // initializeTask();
+}
+
+void loop() {}
