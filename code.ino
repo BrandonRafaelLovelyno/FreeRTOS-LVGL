@@ -16,7 +16,7 @@ static lv_color_t buf[LV_HOR_RES_MAX * 10];
 static lv_disp_drv_t disp_drv;
 
 // DHT
-#define DHT_PIN 12
+#define DHT_PIN 13
 DHT dht(DHT_PIN, DHT22);
 const int numReadings = 100;
 int currentDHTRead = 0;
@@ -25,6 +25,7 @@ int readIndex = 0;
 float total = 0;
 float mean = 0;
 float currentTemp = 0.0;
+
 
 // label
 lv_obj_t *label_mean;
@@ -36,40 +37,42 @@ lv_obj_t *label_max;
 lv_obj_t *label_current;
 
 void lv_disp_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p) {
-    int32_t x, y;
-    for (y = area->y1; y <= area->y2; y++) {
-        for (x = area->x1; x <= area->x2; x++) {
-            uint16_t color = color_p->full;  
-            tft.drawPixel(x, y, color);
-            color_p++;
-        }
+  int32_t x, y;
+  for (y = area->y1; y <= area->y2; y++) {
+    for (x = area->x1; x <= area->x2; x++) {
+      uint16_t color = color_p->full; // Get the color from the buffer
+      tft.drawPixel(x, y, color); // Draw the pixel on the display
+      color_p++; // Move to the next color
     }
-    lv_disp_flush_ready(drv);  
+  }
+  lv_disp_flush_ready(drv); // Notify LVGL that the flushing is done
 }
 
 void initializeDisplay() {
-    Serial.println("Initializing display...");
-    tft.begin();
-    lv_init();
+  Serial.println("Initializing display...");
+  tft.begin(); // Initialize the TFT display
+  lv_init(); // Initialize LVGL
 
-    lv_disp_draw_buf_init(&draw_buf, buf, NULL, LV_HOR_RES_MAX * 10);
+  static lv_disp_draw_buf_t draw_buf;
+  static lv_color_t buf[LV_HOR_RES_MAX * 10]; // Define buffer size
+  lv_disp_draw_buf_init(&draw_buf, buf, NULL, LV_HOR_RES_MAX * 10); // Initialize buffer
 
-    lv_disp_drv_init(&disp_drv);
-    disp_drv.hor_res = LV_HOR_RES_MAX;
-    disp_drv.ver_res = LV_VER_RES_MAX;
-    disp_drv.flush_cb = lv_disp_flush_cb;
-    disp_drv.draw_buf = &draw_buf;
+  static lv_disp_drv_t disp_drv;
+  lv_disp_drv_init(&disp_drv); // Initialize display driver
+  disp_drv.hor_res = 240; // Horizontal resolution
+  disp_drv.ver_res = 320; // Vertical resolution
+  disp_drv.flush_cb = lv_disp_flush_cb; // Set flush callback
+  disp_drv.draw_buf = &draw_buf; // Set the draw buffer
 
-    lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
-    if (!disp) {
-        Serial.println("Display driver registration failed!");
-        return;
-    }
+  lv_disp_t *disp = lv_disp_drv_register(&disp_drv); // Register display driver
+  if (!disp) {
+    Serial.println("Display driver registration failed!"); // Error message
+    return;
+  }
 
-    createLabel();
-    Serial.println("Display initialized successfully!");
+  createLabel(); // Create a label (example)
+  Serial.println("Display initialized successfully!"); // Success message
 }
-
 
 void taskIncrementTick(void *parameter){
     while(1){
@@ -80,15 +83,15 @@ void taskIncrementTick(void *parameter){
 }
 
 void initializeTask() {
-    xTaskCreate(taskUpdateDHT, "TaskUpdate", 1500, NULL, 2, NULL);
-    xTaskCreate(taskUpdateMeanLabel, "TaskMean", 3000, NULL, 2, NULL);
-    xTaskCreate(taskUpdateDeviationLabel, "TaskDeviation", 3000, NULL, 2, NULL);
-    xTaskCreate(taskUpdateMedianLabel, "TaskMedian", 3000, NULL, 2, NULL);
-    xTaskCreate(taskUpdateModeLabel, "TaskMode", 3000, NULL, 2, NULL);
-    xTaskCreate(taskUpdateMinLabel, "TaskMin", 3000, NULL, 2, NULL);
-    xTaskCreate(taskUpdateMaxLabel, "TaskMax", 3000, NULL, 2, NULL);
+    xTaskCreate(taskUpdateDHT, "TaskUpdate", 1500, NULL, 3, NULL);
+    xTaskCreate(taskUpdateMeanLabel, "TaskMean", 3000, NULL, 3, NULL);
+    xTaskCreate(taskUpdateDeviationLabel, "TaskDeviation", 3000, NULL, 3, NULL);
+    xTaskCreate(taskUpdateMedianLabel, "TaskMedian", 3000, NULL, 3, NULL);
+    xTaskCreate(taskUpdateModeLabel, "TaskMode", 3000, NULL, 3, NULL);
+    xTaskCreate(taskUpdateMinLabel, "TaskMin", 3000, NULL, 3, NULL);
+    xTaskCreate(taskUpdateMaxLabel, "TaskMax", 3000, NULL, 3, NULL);
     xTaskCreate(taskIncrementTick, "TaskTick", 3500, NULL, 1, NULL);
-    xTaskCreate(taskUpdateCurrentLabel, "TaskCurrent", 3000, NULL, 2, NULL);
+    xTaskCreate(taskUpdateCurrentLabel, "TaskCurrent", 3500, NULL, 2, NULL);
 }
 
 void initializeDHT() {
@@ -104,6 +107,7 @@ void taskUpdateCurrentLabel(void *parameter) {
         char buffer[20]; 
         snprintf(buffer, sizeof(buffer), "Current: %.2f", currentTemp);
         lv_label_set_text(label_current, buffer);
+        Serial.println("Task update current label");
         vTaskDelay(pdMS_TO_TICKS(LOOP_INTERVAL));
     }
 }
